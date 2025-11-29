@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Aurora Gyro Debugger</title>
+    <style>
+        /* CSS Reset & Layout */
+        * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+        
+        body {
+            background-color: #000;
+            overflow: hidden;
+            font-family: monospace; /* Monospace for debug text */
+            color: white;
+            height: 100dvh;
+            width: 100vw;
+            touch-action: none;
+        }
+
+        /* Scene Container */
+        #scene {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at 50% 120%, #1b2949 0%, #080914 50%, #000000 100%);
+        }
+
+        /* Canvas Layers */
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        #starCanvas { z-index: 1; }
+        #auroraCanvas { 
+            z-index: 2; 
+            mix-blend-mode: screen; 
+            opacity: 0;
+            transition: opacity 1s ease-in-out;
+            filter: blur(8px);
+        }
+        #terrainCanvas { z-index: 3; }
+
+        /* UI Layer */
+        .ui-layer {
+            position: absolute;
+            z-index: 10;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            pointer-events: none;
+            transition: transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+
+        h1 {
+            font-family: sans-serif;
+            font-weight: 200;
+            letter-spacing: 6px;
+            text-transform: uppercase;
+            margin-bottom: 3rem;
+            text-shadow: 0 0 20px rgba(0, 255, 150, 0.5);
+            pointer-events: auto;
+        }
+
+        .standard-btn {
+            position: relative;
+            pointer-events: auto;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 20px 50px;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        /* Debug Status Panel */
+        #status {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            width: 100%;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 12px;
+            z-index: 20;
+            pointer-events: none;
+            padding: 0 20px;
+            line-height: 1.5;
+        }
+
+        /* Active State */
+        body.active .ui-layer {
+            justify-content: flex-end;
+            padding-bottom: 80px;
+        }
+
+        body.active #auroraCanvas {
+            opacity: 1;
+        }
+
+        body.active h1 {
+            display: none;
+        }
+
+        body.active .standard-btn {
+            padding: 12px 30px;
+            font-size: 0.9rem;
+            background: rgba(0,0,0,0.4);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="scene">
+        <canvas id="starCanvas"></canvas>
+        <canvas id="auroraCanvas"></canvas>
+        <canvas id="terrainCanvas"></canvas>
+
+        <div class="ui-layer">
+            <h1>Aurora</h1>
+            <button id="toggleBtn" class="standard-btn">Ignite Aurora</button>
+        </div>
+
+        <div id="status">Initializing...</div>
+    </div>
+
+    <script>
+        // --- Debug Logger ---
+        const statusEl = document.getElementById('status');
+        function log(msg) {
+            statusEl.innerHTML = msg;
+            console.log(msg);
+        }
+
+        // --- Config ---
+        const config = {
+            starCount: 200,
+            auroraColors: [
+                ['rgba(0,255,100,0)', 'rgba(0,255,100,0.3)', 'rgba(0,100,255,0.1)', 'rgba(0,0,0,0)'],
+                ['rgba(50,0,255,0)', 'rgba(150,0,255,0.3)', 'rgba(255,0,100,0.1)', 'rgba(0,0,0,0)'],
+                ['rgba(0,255,200,0)', 'rgba(0,255,255,0.3)', 'rgba(255,255,255,0.1)', 'rgba(0,0,0,0)']
+            ]
+        };
+
+        // --- State ---
+        let width, height;
+        let active = false;
+        let currentPalette = config.auroraColors[0];
+        let hasSensorAccess = false;
+        
+        // Gyro Data
+        let tilt = { x: 0, y: 0 };
+        let targetTilt = { x: 0, y: 0 };
+        let initialGamma = null; // Calibration reference
+
+        // Contexts
+        const starCanvas = document.getElementById('starCanvas');
+        const auroraCanvas = document.getElementById('auroraCanvas');
+        const terrainCanvas = document.getElementById('terrainCanvas');
+        const starCtx = starCanvas.getContext('2d');
+        const auroraCtx = auroraCanvas.getContext('2d');
+        const terrainCtx = terrainCanvas.getContext('2d');
+        const btn = document.getElementById('toggleBtn');
+
+        // --- Resize ---
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            [starCanvas, auroraCanvas, terrainCanvas].forEach(c => {
+                c.width = width;
+                c.height = height;
+            });
+            drawStars();
+            drawTerrain();
+            if(active) drawAurora();
+        }
+
+        // --- Drawing Functions ---
+        const stars = [];
+        function initStars() {
+            stars.length = 0;
+            for(let i=0; i<config.starCount; i++){
+                stars.push({
+                    x: Math.random() * width,
+                    y: Math.random() * height * 0.7,
+                    size: Math.random() * 2,
+                    alpha: Math.random()
+                });
+            }
+        }
+
+        function drawStars() {
+            if(stars.length === 0) initStars();
+            starCtx.clearRect(0,0,width,height);
+            
+            // Parallax: Stars move slowly
+            const px = tilt.x * 20;
+            const py = tilt.y * 20;
+
+            starCtx.fillStyle = "white";
+            stars.forEach(s => {
+                starCtx.globalAlpha = s.alpha;
+                let x = (s.x + px + width) % width;
+                let y = s.y + py;
+                starCtx.beginPath();
+                starCtx.arc(x, y, s.size, 0, Math.PI*2);
+                starCtx.fill();
+            });
+            starCtx.globalAlpha = 1;
+        }
+
+        let terrainPath = [];
+        function initTerrain() {
+            terrainPath = [];
+            let x = 0;
+            let y = height * 0.75;
+            terrainPath.push({x:0, y:height});
+            terrainPath.push({x:0, y:y});
+            while(x < width) {
+                x += 20 + Math.random() * 80;
+                y = Math.min(height * 0.9, Math.max(height * 0.6, y + (Math.random()-0.5)*100));
+                terrainPath.push({x,y});
+            }
+            terrainPath.push({x:width, y:height});
+        }
+
+        function drawTerrain() {
+            if(terrainPath.length === 0) initTerrain();
+            terrainCtx.clearRect(0,0,width,height);
+            
+            // Parallax: Mountains move faster (closer)
+            const px = tilt.x * 60;
+            const py = tilt.y * 40;
+
+            terrainCtx.save();
+            terrainCtx.translate(px, py);
+            terrainCtx.beginPath();
+            terrainCtx.moveTo(terrainPath[0].x, terrainPath[0].y);
+            for(let i=1; i<terrainPath.length; i++){
+                const p = terrainPath[i];
+                const prev = terrainPath[i-1];
+                const cpX = (prev.x + p.x)/2;
+                const cpY = (prev.y + p.y)/2;
+                terrainCtx.quadraticCurveTo(prev.x, prev.y, cpX, cpY);
+            }
+            terrainCtx.lineTo(width, height); 
+            terrainCtx.lineTo(0, height);     
+            terrainCtx.fillStyle = "#020305";
+            terrainCtx.fill();
+            terrainCtx.lineWidth = 2;
+            terrainCtx.strokeStyle = "rgba(100,150,255,0.1)";
+            terrainCtx.stroke();
+            terrainCtx.restore();
+        }
+
+        function drawAurora() {
+            auroraCtx.clearRect(0, 0, width, height);
+            auroraCtx.globalCompositeOperation = "lighter";
+
+            // Parallax: Aurora moves most
+            const shiftX = tilt.x * 150; 
+            const shiftY = tilt.y * 80;
+
+            for(let c=0; c<2; c++) {
+                auroraCtx.beginPath();
+                const baseY = height * 0.5 + shiftY;
+                
+                for (let x = 0; x <= width; x += 5) {
+                    // Static noise shape
+                    const noise = 
+                        Math.sin(x * 0.003 + c) * 60 + 
+                        Math.sin(x * 0.007 + c*2) * 30 +
+                        Math.sin(x * 0.01) * 20;
+
+                    const y = baseY + noise;
+                    const drawX = x + (shiftX * ((y/height)));
+
+                    const gradient = auroraCtx.createLinearGradient(drawX, y, drawX, y - 400);
+                    gradient.addColorStop(0, currentPalette[0]);
+                    gradient.addColorStop(0.2, currentPalette[1]);
+                    gradient.addColorStop(0.6, currentPalette[2]);
+                    gradient.addColorStop(1, currentPalette[3]);
+
+                    auroraCtx.fillStyle = gradient;
+                    auroraCtx.fillRect(drawX, y - 400, 6, 450);
+                }
+            }
+        }
+
+        function animate() {
+            // Smooth LERP
+            tilt.x += (targetTilt.x - tilt.x) * 0.1;
+            tilt.y += (targetTilt.y - tilt.y) * 0.1;
+
+            drawStars();
+            if (active) drawAurora();
+            drawTerrain();
+
+            // Debug info
+            if (active && hasSensorAccess) {
+                log(`Tilt X: ${Math.round(tilt.x*100)}% | Tilt Y: ${Math.round(tilt.y*100)}%`);
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // --- SENSOR LOGIC ---
+        function handleOrientation(e) {
+            hasSensorAccess = true;
+            
+            let tx = 0, ty = 0;
+
+            // iOS and Android sometimes differ in null checks
+            const gamma = e.gamma; // Left/Right tilt
+            const beta = e.beta;   // Front/Back tilt
+
+            if (gamma === null || beta === null) {
+                log("Sensors detected but sending null data.");
+                return;
+            }
+
+            // Calibrate initial position if needed
+            if (initialGamma === null) initialGamma = gamma;
+
+            // Normalize
+            // Gamma: -90 to 90
+            // Beta: -180 to 180
+            
+            // Adjust to hold phone upright-ish (beta around 45)
+            const betaOffset = beta - 45;
+
+            // Clamp values to avoid extreme spinning
+            const maxTilt = 45;
+            tx = Math.max(-maxTilt, Math.min(maxTilt, gamma));
+            ty = Math.max(-maxTilt, Math.min(maxTilt, betaOffset));
+
+            targetTilt.x = tx / maxTilt;
+            targetTilt.y = ty / maxTilt;
+        }
+
+        btn.addEventListener('click', async () => {
+            // 1. Check Secure Context
+            if (!window.isSecureContext && window.location.hostname !== 'localhost') {
+                log("ERROR: App must be run over HTTPS.");
+                return;
+            }
+
+            // 2. Request Permissions (iOS 13+)
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    log("Requesting iOS permissions...");
+                    const response = await DeviceOrientationEvent.requestPermission();
+                    if (response === 'granted') {
+                        log("Permission GRANTED.");
+                        window.addEventListener('deviceorientation', handleOrientation);
+                        toggleApp();
+                    } else {
+                        log("Permission DENIED by user.");
+                    }
+                } catch (error) {
+                    log("Error requesting permission: " + error.message);
+                }
+            } 
+            // 3. Android / Standard handling
+            else if (window.DeviceOrientationEvent) {
+                log("Standard sensors detected.");
+                window.addEventListener('deviceorientation', handleOrientation);
+                toggleApp();
+            } else {
+                log("ERROR: No orientation sensors found on this device.");
+            }
+        });
+
+        function toggleApp() {
+            if(!active) {
+                active = true;
+                document.body.classList.add('active');
+                btn.innerText = "Stop";
+                currentPalette = config.auroraColors[Math.floor(Math.random() * config.auroraColors.length)];
+                initTerrain();
+                log("Aurora Active. Waiting for movement...");
+            } else {
+                active = false;
+                document.body.classList.remove('active');
+                btn.innerText = "Ignite Aurora";
+                auroraCtx.clearRect(0,0,width,height);
+                log("Aurora Stopped.");
+            }
+        }
+
+        // Mouse Fallback for testing on computer
+        window.addEventListener('mousemove', (e) => {
+            if(!hasSensorAccess) { // Only use mouse if sensors aren't active
+                targetTilt.x = (e.clientX / width - 0.5) * 2;
+                targetTilt.y = (e.clientY / height - 0.5) * 2;
+                if(active) log("Mouse Mode (Sensors inactive)");
+            }
+        });
+
+        // Start
+        window.addEventListener('resize', resize);
+        resize();
+        animate();
+        log("Ready. Tap button to start.");
+
+    </script>
+</body>
+</html>
